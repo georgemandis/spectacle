@@ -1,0 +1,7 @@
+.{
+    .fingerprint = 0xe55076f4424de305,
+    .name = .spectacle,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+}
