@@ -47,6 +47,8 @@ pub fn build(b: *std.Build) void {
             capture_mod.linkFramework("CoreMedia", .{});
             capture_mod.linkFramework("ScreenCaptureKit", .{});
             capture_mod.linkFramework("CoreGraphics", .{});
+            capture_mod.linkFramework("AVFoundation", .{});
+            capture_mod.linkFramework("ImageIO", .{});
         },
         .windows => {
             capture_mod.link_libc = true;
