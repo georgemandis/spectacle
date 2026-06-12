@@ -38,6 +38,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  audio              Capture system audio only
         \\  screenshot          Take a screenshot (PNG or JPEG)
         \\  list <target>      List displays, windows, or audio-sources
+        \\  completions <shell> Generate shell completions (bash, zsh, fish)
         \\  help               Show this help message
         \\
         \\Options:
@@ -1173,6 +1174,213 @@ fn runScreenshot(
 }
 
 // ---------------------------------------------------------------------------
+// Completions command implementation
+// ---------------------------------------------------------------------------
+
+fn runCompletions(
+    args_iter: anytype,
+    stdout_writer: *std.Io.Writer,
+    stderr_writer: *std.Io.Writer,
+) !void {
+    const shell = args_iter.next() orelse {
+        try stderr_writer.print("Error: 'completions' requires a shell: bash, zsh, or fish\n", .{});
+        try stderr_writer.flush();
+        std.process.exit(@intFromEnum(types.ExitCode.invalid_args));
+        unreachable;
+    };
+
+    if (std.mem.eql(u8, shell, "bash")) {
+        try stdout_writer.print(
+            \\# spectacle completions for bash
+            \\# Install: eval "$(spectacle completions bash)"
+            \\# Persist: spectacle completions bash > /etc/bash_completion.d/spectacle
+            \\
+            \\_spectacle() {{
+            \\    local cur prev words cword
+            \\    _init_completion || return
+            \\
+            \\    local commands="record screenshot audio list completions help"
+            \\
+            \\    if [[ $cword -eq 1 ]]; then
+            \\        COMPREPLY=($(compgen -W "$commands --help -h --version -v" -- "$cur"))
+            \\        return
+            \\    fi
+            \\
+            \\    local cmd="${{words[1]}}"
+            \\
+            \\    case "$cmd" in
+            \\        record)
+            \\            COMPREPLY=($(compgen -W "--output --window --pid --app --display --region --no-audio --no-cursor --mic --mic-device --fps --scale --sample-rate --channels" -- "$cur"))
+            \\            ;;
+            \\        screenshot)
+            \\            COMPREPLY=($(compgen -W "--output --window --pid --app --display --region --no-cursor --scale" -- "$cur"))
+            \\            ;;
+            \\        audio)
+            \\            COMPREPLY=($(compgen -W "--output --app --sample-rate --channels" -- "$cur"))
+            \\            ;;
+            \\        list)
+            \\            if [[ $cword -eq 2 ]]; then
+            \\                COMPREPLY=($(compgen -W "displays windows audio-sources" -- "$cur"))
+            \\            else
+            \\                COMPREPLY=($(compgen -W "--json" -- "$cur"))
+            \\            fi
+            \\            ;;
+            \\        completions)
+            \\            COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
+            \\            ;;
+            \\    esac
+            \\}}
+            \\
+            \\complete -F _spectacle spectacle
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, shell, "zsh")) {
+        try stdout_writer.print(
+            \\#compdef spectacle
+            \\# spectacle completions for zsh
+            \\# Install: spectacle completions zsh | source /dev/stdin
+            \\# Persist: spectacle completions zsh > ~/.zfunc/_spectacle && fpath+=(~/.zfunc)
+            \\
+            \\_spectacle() {{
+            \\    local -a commands
+            \\    commands=(
+            \\        'record:Record screen video and system audio'
+            \\        'screenshot:Take a screenshot (PNG or JPEG)'
+            \\        'audio:Capture system audio only'
+            \\        'list:List displays, windows, or audio sources'
+            \\        'completions:Generate shell completions'
+            \\        'help:Show help message'
+            \\    )
+            \\
+            \\    _arguments -C \
+            \\        '1:command:->command' \
+            \\        '*::arg:->args'
+            \\
+            \\    case "$state" in
+            \\        command)
+            \\            _describe 'command' commands
+            \\            ;;
+            \\        args)
+            \\            case "$words[1]" in
+            \\                record)
+            \\                    _arguments \
+            \\                        '--output[Output file path]:file:_files' \
+            \\                        '--window[Capture window by title]:name:' \
+            \\                        '--pid[Capture window by PID]:pid:' \
+            \\                        '--app[Capture app by name]:name:' \
+            \\                        '--display[Display index]:index:' \
+            \\                        '--region[Capture region X,Y,W,H]:region:' \
+            \\                        '--no-audio[Suppress audio capture]' \
+            \\                        '--no-cursor[Hide cursor]' \
+            \\                        '--mic[Include microphone]' \
+            \\                        '--mic-device[Microphone device name]:name:' \
+            \\                        '--fps[Frame rate]:fps:' \
+            \\                        '--scale[Resolution scale]:scale:' \
+            \\                        '--sample-rate[Audio sample rate]:rate:' \
+            \\                        '--channels[Audio channels]:channels:'
+            \\                    ;;
+            \\                screenshot)
+            \\                    _arguments \
+            \\                        '--output[Output file path]:file:_files' \
+            \\                        '--window[Capture window by title]:name:' \
+            \\                        '--pid[Capture window by PID]:pid:' \
+            \\                        '--app[Capture app by name]:name:' \
+            \\                        '--display[Display index]:index:' \
+            \\                        '--region[Capture region X,Y,W,H]:region:' \
+            \\                        '--no-cursor[Hide cursor]' \
+            \\                        '--scale[Resolution scale]:scale:'
+            \\                    ;;
+            \\                audio)
+            \\                    _arguments \
+            \\                        '--output[Output file path]:file:_files' \
+            \\                        '--app[Capture app by name]:name:' \
+            \\                        '--sample-rate[Audio sample rate]:rate:' \
+            \\                        '--channels[Audio channels]:channels:'
+            \\                    ;;
+            \\                list)
+            \\                    _arguments '1:target:(displays windows audio-sources)' '--json[JSON output]'
+            \\                    ;;
+            \\                completions)
+            \\                    _arguments '1:shell:(bash zsh fish)'
+            \\                    ;;
+            \\            esac
+            \\            ;;
+            \\    esac
+            \\}}
+            \\
+            \\_spectacle "$@"
+            \\
+        , .{});
+    } else if (std.mem.eql(u8, shell, "fish")) {
+        try stdout_writer.print(
+            \\# spectacle completions for fish
+            \\# Install: spectacle completions fish | source
+            \\# Persist: spectacle completions fish > ~/.config/fish/completions/spectacle.fish
+            \\
+            \\complete -e -c spectacle
+            \\complete -c spectacle -f
+            \\complete -c spectacle -n "__fish_use_subcommand" -a "record" -d "Record screen video and system audio"
+            \\complete -c spectacle -n "__fish_use_subcommand" -a "screenshot" -d "Take a screenshot (PNG or JPEG)"
+            \\complete -c spectacle -n "__fish_use_subcommand" -a "audio" -d "Capture system audio only"
+            \\complete -c spectacle -n "__fish_use_subcommand" -a "list" -d "List displays, windows, or audio sources"
+            \\complete -c spectacle -n "__fish_use_subcommand" -a "completions" -d "Generate shell completions"
+            \\complete -c spectacle -n "__fish_use_subcommand" -a "help" -d "Show help message"
+            \\complete -c spectacle -n "__fish_use_subcommand" -l help -s h -d "Show help"
+            \\complete -c spectacle -n "__fish_use_subcommand" -l version -s v -d "Show version"
+            \\
+            \\# record options
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l output -r -d "Output file path"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l window -r -d "Capture window by title"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l pid -r -d "Capture window by PID"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l app -r -d "Capture app by name"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l display -r -d "Display index"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l region -r -d "Capture region X,Y,W,H"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l no-audio -d "Suppress audio"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l no-cursor -d "Hide cursor"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l mic -d "Include microphone"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l mic-device -r -d "Microphone device"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l fps -r -d "Frame rate"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l scale -r -d "Resolution scale"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l sample-rate -r -d "Audio sample rate"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from record" -l channels -r -d "Audio channels"
+            \\
+            \\# screenshot options
+            \\complete -c spectacle -n "__fish_seen_subcommand_from screenshot" -l output -r -d "Output file path"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from screenshot" -l window -r -d "Capture window by title"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from screenshot" -l pid -r -d "Capture window by PID"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from screenshot" -l app -r -d "Capture app by name"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from screenshot" -l display -r -d "Display index"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from screenshot" -l region -r -d "Capture region X,Y,W,H"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from screenshot" -l no-cursor -d "Hide cursor"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from screenshot" -l scale -r -d "Resolution scale"
+            \\
+            \\# audio options
+            \\complete -c spectacle -n "__fish_seen_subcommand_from audio" -l output -r -d "Output file path"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from audio" -l app -r -d "Capture app by name"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from audio" -l sample-rate -r -d "Audio sample rate"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from audio" -l channels -r -d "Audio channels"
+            \\
+            \\# list sub-targets
+            \\complete -c spectacle -n "__fish_seen_subcommand_from list" -a "displays" -d "List displays"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from list" -a "windows" -d "List windows"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from list" -a "audio-sources" -d "List audio sources"
+            \\complete -c spectacle -n "__fish_seen_subcommand_from list" -l json -d "JSON output"
+            \\
+            \\# completions sub-targets
+            \\complete -c spectacle -n "__fish_seen_subcommand_from completions" -a "bash zsh fish" -d "Shell type"
+            \\
+        , .{});
+    } else {
+        try stderr_writer.print("Error: unsupported shell '{s}'. Use bash, zsh, or fish\n", .{shell});
+        try stderr_writer.flush();
+        std.process.exit(@intFromEnum(types.ExitCode.invalid_args));
+        unreachable;
+    }
+
+    try stdout_writer.flush();
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -1217,6 +1425,8 @@ pub fn main(init: std.process.Init) !void {
         try runScreenshot(&args_iter, &stderr.interface);
     } else if (std.mem.eql(u8, command, "audio")) {
         try runAudio(&args_iter, &stderr.interface);
+    } else if (std.mem.eql(u8, command, "completions")) {
+        try runCompletions(&args_iter, &stdout.interface, &stderr.interface);
     } else if (std.mem.eql(u8, command, "list")) {
         // Parse list sub-target and optional --json flag
         const list_target = args_iter.next() orelse {
