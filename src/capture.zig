@@ -38,3 +38,26 @@ pub fn startCapture(
 pub fn stopCapture(handle: CaptureHandle) void {
     platform.stopCapture(handle);
 }
+
+pub fn listMicDevices(allocator: @import("std").mem.Allocator) ![]@import("types").MicDevice {
+    return platform.listMicDevices(allocator);
+}
+
+pub fn startMicCapture(sample_cb: *const fn (AudioSamples) void, device_name: ?[*:0]const u8) !void {
+    return platform.startMicCapture(sample_cb, device_name);
+}
+
+pub fn stopMicCapture() void {
+    platform.stopMicCapture();
+}
+
+pub const ImageFormat = types.ImageFormat;
+
+pub fn captureScreenshot(
+    target: CaptureTarget,
+    config: CaptureConfig,
+    output_path: [*:0]const u8,
+    format: ImageFormat,
+) !void {
+    return platform.captureScreenshot(target, config, output_path, format);
+}
