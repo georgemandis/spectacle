@@ -26,6 +26,12 @@ pub const AudioSource = struct {
     source_id: u64, // opaque platform source ID
 };
 
+pub const MicDevice = struct {
+    name: ?[*:0]const u8,
+    uid: ?[*:0]const u8, // unique device ID for selection
+    is_default: bool,
+};
+
 // ---------------------------------------------------------------------------
 // Target types
 // ---------------------------------------------------------------------------
@@ -36,6 +42,11 @@ pub const CaptureTarget = union(enum) {
     window_title: [*:0]const u8, // substring match
     window_pid: u32, // by PID
     region: struct { x: u32, y: u32, w: u32, h: u32, display: u32 },
+};
+
+pub const ImageFormat = enum {
+    png,
+    jpeg,
 };
 
 pub const AudioTarget = union(enum) {
@@ -53,6 +64,7 @@ pub const CaptureConfig = struct {
     scale: f32 = 1.0,
     capture_audio: bool = true,
     show_cursor: bool = true,
+    capture_mic: bool = false,
     sample_rate: u32 = 48000,
     channels: u32 = 2,
 };
