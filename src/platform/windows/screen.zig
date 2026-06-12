@@ -28,3 +28,29 @@ pub fn startCapture(
 pub fn stopCapture(handle: types.CaptureHandle) void {
     _ = handle;
 }
+
+pub fn listMicDevices(allocator: @import("std").mem.Allocator) ![]types.MicDevice {
+    _ = allocator;
+    return error.Unsupported;
+}
+
+pub fn startMicCapture(sample_cb: *const fn (types.AudioSamples) void, device_name: ?[*:0]const u8) !void {
+    _ = sample_cb;
+    _ = device_name;
+    return error.Unsupported;
+}
+
+pub fn stopMicCapture() void {}
+
+pub fn captureScreenshot(
+    target: types.CaptureTarget,
+    config: types.CaptureConfig,
+    output_path: [*:0]const u8,
+    format: types.ImageFormat,
+) !void {
+    _ = target;
+    _ = config;
+    _ = output_path;
+    _ = format;
+    return error.Unsupported;
+}
