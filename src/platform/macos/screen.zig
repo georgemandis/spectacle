@@ -11,6 +11,7 @@ const dispatch_semaphore_t = *opaque {};
 extern "c" fn dispatch_semaphore_create(value: isize) ?dispatch_semaphore_t;
 extern "c" fn dispatch_semaphore_wait(dsema: dispatch_semaphore_t, timeout: u64) isize;
 extern "c" fn dispatch_semaphore_signal(dsema: dispatch_semaphore_t) isize;
+extern "c" fn dispatch_time(when: u64, delta: i64) u64;
 
 // DISPATCH_TIME_FOREVER
 const DISPATCH_TIME_FOREVER: u64 = ~@as(u64, 0);
@@ -987,4 +988,362 @@ fn findWindowByPid(content: objc.id, pid: u32) !objc.id {
     }
 
     return error.TargetNotFound;
+}
+
+// ---------------------------------------------------------------------------
+// Microphone capture via AVCaptureSession
+// ---------------------------------------------------------------------------
+
+pub fn listMicDevices(allocator: std.mem.Allocator) ![]types.MicDevice {
+    const pool = objc.autoreleasePoolPush();
+    defer objc.autoreleasePoolPop(pool);
+
+    const AVCaptureDevice = objc.getClass("AVCaptureDevice") orelse return error.BackendInitFailed;
+    const AVCaptureDeviceDiscoverySession = objc.getClass("AVCaptureDeviceDiscoverySession") orelse return error.BackendInitFailed;
+    const NSArray = objc.getClass("NSArray") orelse return error.BackendInitFailed;
+
+    const media_type = objc.nsString("soun");
+
+    // Device types: built-in mic + external unknown
+    const builtin_mic = objc.nsString("AVCaptureDeviceTypeMicrophone");
+    const external = objc.nsString("AVCaptureDeviceTypeExternal");
+
+    const device_types = objc.msgSend(objc.id, NSArray, objc.sel("arrayWithObjects:count:"), .{
+        @as([*]const objc.id, &[_]objc.id{ builtin_mic, external }),
+        @as(objc.NSUInteger, 2),
+    });
+
+    const discovery = objc.msgSend(objc.id, AVCaptureDeviceDiscoverySession, objc.sel("discoverySessionWithDeviceTypes:mediaType:position:"), .{
+        device_types,
+        media_type,
+        @as(objc.NSInteger, 0),
+    });
+
+    const devices_array = objc.msgSend(objc.id, discovery, objc.sel("devices"), .{});
+    const count = objc.nsArrayCount(devices_array);
+
+    // Also get the default device to mark it
+    const default_device: ?objc.id = objc.msgSend(?objc.id, AVCaptureDevice, objc.sel("defaultDeviceWithMediaType:"), .{media_type});
+    var default_uid_cstr: ?[*:0]const u8 = null;
+    if (default_device) |dev| {
+        const uid_ns: ?objc.id = objc.msgSend(?objc.id, dev, objc.sel("uniqueID"), .{});
+        if (uid_ns) |u| {
+            default_uid_cstr = objc.fromNSString(u);
+        }
+    }
+
+    var result = try allocator.alloc(types.MicDevice, count);
+    errdefer allocator.free(result);
+
+    for (0..count) |i| {
+        const device = objc.nsArrayObjectAtIndex(devices_array, i);
+
+        const name_ns: ?objc.id = objc.msgSend(?objc.id, device, objc.sel("localizedName"), .{});
+        const uid_ns: ?objc.id = objc.msgSend(?objc.id, device, objc.sel("uniqueID"), .{});
+
+        const name_cstr: ?[*:0]const u8 = if (name_ns) |n| objc.fromNSString(n) else null;
+        const uid_cstr: ?[*:0]const u8 = if (uid_ns) |u| objc.fromNSString(u) else null;
+
+        var is_default = false;
+        if (default_uid_cstr) |duid| {
+            if (uid_cstr) |uid| {
+                is_default = std.mem.eql(u8, std.mem.sliceTo(duid, 0), std.mem.sliceTo(uid, 0));
+            }
+        }
+
+        result[i] = .{
+            .name = name_cstr,
+            .uid = uid_cstr,
+            .is_default = is_default,
+        };
+    }
+
+    return result;
+}
+
+var g_mic_cb: ?*const fn (types.AudioSamples) void = null;
+var g_mic_session: ?objc.id = null;
+var mic_delegate_class: ?objc.Class = null;
+var mic_delegate_registered: bool = false;
+
+var mic_interleave_buf: [8192]f32 = undefined;
+
+fn micCaptureOutputHandler(
+    _: objc.id,
+    _: objc.SEL,
+    _: objc.id,
+    sample_buffer: objc.id,
+    _: objc.id,
+) callconv(.c) void {
+    const cb = g_mic_cb orelse return;
+
+    const block_buffer = CMSampleBufferGetDataBuffer(sample_buffer) orelse return;
+
+    var data_ptr: ?[*]u8 = null;
+    var total_length: usize = 0;
+
+    const status = CMBlockBufferGetDataPointer(block_buffer, 0, null, &total_length, &data_ptr);
+    if (status != 0) return;
+    const data = data_ptr orelse return;
+
+    const fmt_desc = CMSampleBufferGetFormatDescription(sample_buffer) orelse return;
+    const asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt_desc) orelse return;
+
+    const channels: u32 = asbd.mChannelsPerFrame;
+    const sample_rate: u32 = @intFromFloat(asbd.mSampleRate);
+    if (channels == 0) return;
+
+    const num_samples = CMSampleBufferGetNumSamples(sample_buffer);
+    if (num_samples <= 0) return;
+    const frame_count: u32 = @intCast(num_samples);
+
+    const pts = CMSampleBufferGetPresentationTimeStamp(sample_buffer);
+    const timestamp_ns = cmTimeToNanos(pts);
+
+    const src: [*]const f32 = @ptrCast(@alignCast(data));
+    const is_non_interleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
+
+    // If non-interleaved multi-channel, interleave first
+    var interleaved: [*]const f32 = src;
+    if (is_non_interleaved and channels > 1) {
+        const fc: usize = frame_count;
+        const total_samples = fc * channels;
+        if (total_samples > mic_interleave_buf.len) return;
+
+        for (0..fc) |i| {
+            for (0..channels) |ch| {
+                mic_interleave_buf[i * channels + ch] = src[ch * fc + i];
+            }
+        }
+        interleaved = &mic_interleave_buf;
+    }
+
+    // Upmix mono to stereo to match encoder's expected 2-channel format
+    if (channels == 1) {
+        const fc: usize = frame_count;
+        const total_samples = fc * 2;
+        if (total_samples > mic_interleave_buf.len) return;
+
+        for (0..fc) |i| {
+            mic_interleave_buf[i * 2] = interleaved[i];
+            mic_interleave_buf[i * 2 + 1] = interleaved[i];
+        }
+
+        cb(.{
+            .data = &mic_interleave_buf,
+            .frame_count = frame_count,
+            .channels = 2,
+            .sample_rate = sample_rate,
+            .timestamp_ns = timestamp_ns,
+        });
+    } else {
+        cb(.{
+            .data = interleaved,
+            .frame_count = frame_count,
+            .channels = channels,
+            .sample_rate = sample_rate,
+            .timestamp_ns = timestamp_ns,
+        });
+    }
+}
+
+pub fn startMicCapture(audio_cb: *const fn (types.AudioSamples) void, device_name: ?[*:0]const u8) !void {
+    const pool = objc.autoreleasePoolPush();
+    defer objc.autoreleasePoolPop(pool);
+
+    g_mic_cb = audio_cb;
+
+    const AVCaptureDevice = objc.getClass("AVCaptureDevice") orelse return error.BackendInitFailed;
+    const AVMediaTypeAudio = objc.nsString("soun");
+
+    var device: ?objc.id = null;
+
+    if (device_name) |name| {
+        // Find device by name substring match
+        const search = std.mem.sliceTo(name, 0);
+        const devices = listMicDevices(std.heap.page_allocator) catch return error.BackendInitFailed;
+        defer std.heap.page_allocator.free(devices);
+
+        for (devices) |mic| {
+            if (mic.uid) |uid| {
+                if (mic.name) |mname| {
+                    const mname_slice = std.mem.sliceTo(mname, 0);
+                    // Case-insensitive substring match
+                    var name_lower: [256]u8 = undefined;
+                    const nlen = @min(mname_slice.len, name_lower.len);
+                    for (0..nlen) |i| name_lower[i] = std.ascii.toLower(mname_slice[i]);
+                    var search_lower: [256]u8 = undefined;
+                    const slen = @min(search.len, search_lower.len);
+                    for (0..slen) |i| search_lower[i] = std.ascii.toLower(search[i]);
+
+                    if (std.mem.indexOf(u8, name_lower[0..nlen], search_lower[0..slen]) != null) {
+                        const uid_ns = objc.nsString(uid);
+                        device = objc.msgSend(?objc.id, AVCaptureDevice, objc.sel("deviceWithUniqueID:"), .{uid_ns});
+                        break;
+                    }
+                }
+            }
+        }
+        if (device == null) return error.TargetNotFound;
+    } else {
+        device = objc.msgSend(?objc.id, AVCaptureDevice, objc.sel("defaultDeviceWithMediaType:"), .{AVMediaTypeAudio});
+        if (device == null) return error.TargetNotFound;
+    }
+
+    const AVCaptureDeviceInput = objc.getClass("AVCaptureDeviceInput") orelse return error.BackendInitFailed;
+    const input: ?objc.id = objc.msgSend(?objc.id, AVCaptureDeviceInput, objc.sel("deviceInputWithDevice:error:"), .{
+        device.?,
+        @as(?*?objc.id, null),
+    });
+    if (input == null) return error.BackendInitFailed;
+
+    const AVCaptureSession = objc.getClass("AVCaptureSession") orelse return error.BackendInitFailed;
+    const session_alloc = objc.msgSend(objc.id, AVCaptureSession, objc.sel("alloc"), .{});
+    const session = objc.msgSend(objc.id, session_alloc, objc.sel("init"), .{});
+
+    const can_add_input = objc.msgSend(u8, session, objc.sel("canAddInput:"), .{input.?});
+    if (can_add_input == 0) return error.BackendInitFailed;
+    objc.msgSend(void, session, objc.sel("addInput:"), .{input.?});
+
+    const AVCaptureAudioDataOutput = objc.getClass("AVCaptureAudioDataOutput") orelse return error.BackendInitFailed;
+    const output_alloc = objc.msgSend(objc.id, AVCaptureAudioDataOutput, objc.sel("alloc"), .{});
+    const output = objc.msgSend(objc.id, output_alloc, objc.sel("init"), .{});
+
+    if (!mic_delegate_registered) {
+        const NSObject = objc.getClass("NSObject") orelse return error.BackendInitFailed;
+        mic_delegate_class = objc.allocateClassPair(NSObject, "SpectacleMicDelegate");
+        if (mic_delegate_class) |cls| {
+            _ = objc.addMethod(
+                cls,
+                objc.sel("captureOutput:didOutputSampleBuffer:fromConnection:"),
+                @ptrCast(&micCaptureOutputHandler),
+                "v@:@@@",
+            );
+            _ = objc.addProtocol(cls, "AVCaptureAudioDataOutputSampleBufferDelegate");
+            objc.registerClassPair(cls);
+            mic_delegate_registered = true;
+        } else {
+            return error.BackendInitFailed;
+        }
+    }
+
+    const del_cls = mic_delegate_class orelse return error.BackendInitFailed;
+    const del_cls_id: objc.id = @ptrCast(del_cls);
+    const del_alloc = objc.msgSend(objc.id, del_cls_id, objc.sel("alloc"), .{});
+    const delegate = objc.msgSend(objc.id, del_alloc, objc.sel("init"), .{});
+    objc.msgSend(void, delegate, objc.sel("retain"), .{});
+
+    const mic_queue = dispatch_queue_create("software.less.spectacle.mic", null) orelse return error.BackendInitFailed;
+    const setSampleBufferDelegate = @as(
+        *const fn (objc.id, objc.SEL, objc.id, dispatch_queue_t) callconv(.c) void,
+        @ptrCast(&objc_msgSend),
+    );
+    setSampleBufferDelegate(output, objc.sel("setSampleBufferDelegate:queue:"), delegate, mic_queue);
+
+    const can_add_output = objc.msgSend(u8, session, objc.sel("canAddOutput:"), .{output});
+    if (can_add_output == 0) return error.BackendInitFailed;
+    objc.msgSend(void, session, objc.sel("addOutput:"), .{output});
+
+    objc.msgSend(void, session, objc.sel("startRunning"), .{});
+    g_mic_session = session;
+}
+
+pub fn stopMicCapture() void {
+    if (g_mic_session) |session| {
+        objc.msgSend(void, session, objc.sel("stopRunning"), .{});
+        g_mic_session = null;
+    }
+    g_mic_cb = null;
+}
+
+// ---------------------------------------------------------------------------
+// Screenshot capture (single frame)
+// ---------------------------------------------------------------------------
+
+const image = @import("image.zig");
+
+// Screenshot state: owned copy of first frame's pixel data
+var screenshot_data: ?[]u8 = null;
+var screenshot_width: u32 = 0;
+var screenshot_height: u32 = 0;
+var screenshot_bytes_per_row: u32 = 0;
+var screenshot_sem: ?dispatch_semaphore_t = null;
+var screenshot_captured: bool = false;
+
+fn screenshotFrameCallback(frame: types.VideoFrame) void {
+    // Only capture the first frame
+    if (screenshot_captured) return;
+
+    // Copy pixel data to owned buffer (CVPixelBuffer released after callback)
+    const alloc = std.heap.page_allocator;
+    const buf = alloc.alloc(u8, frame.len) catch return;
+    @memcpy(buf, frame.data[0..frame.len]);
+
+    screenshot_data = buf;
+    screenshot_width = frame.width;
+    screenshot_height = frame.height;
+    screenshot_bytes_per_row = frame.bytes_per_row;
+    screenshot_captured = true;
+
+    // Signal main thread
+    if (screenshot_sem) |sem| {
+        _ = dispatch_semaphore_signal(sem);
+    }
+}
+
+pub fn captureScreenshot(
+    target: types.CaptureTarget,
+    config: types.CaptureConfig,
+    output_path: [*:0]const u8,
+    format: types.ImageFormat,
+) !void {
+    // Reset screenshot state
+    screenshot_data = null;
+    screenshot_width = 0;
+    screenshot_height = 0;
+    screenshot_bytes_per_row = 0;
+    screenshot_captured = false;
+
+    // Create semaphore for waiting on first frame
+    const sem = dispatch_semaphore_create(0) orelse return error.BackendInitFailed;
+    screenshot_sem = sem;
+
+    // Start capture with our screenshot callback (no audio)
+    const handle = try startCapture(target, config, &screenshotFrameCallback, null);
+
+    // Wait for first frame with 5-second timeout
+    // dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)
+    const timeout_ns: u64 = 5_000_000_000;
+    const deadline = dispatch_time(0, @intCast(timeout_ns));
+    const wait_result = dispatch_semaphore_wait(sem, deadline);
+    screenshot_sem = null;
+
+    // Stop capture regardless
+    stopCapture(handle);
+
+    // Check if we got a frame
+    if (wait_result != 0) {
+        // Timeout — no frame received
+        if (screenshot_data) |d| {
+            std.heap.page_allocator.free(d);
+            screenshot_data = null;
+        }
+        return error.BackendInitFailed;
+    }
+
+    const data = screenshot_data orelse return error.BackendInitFailed;
+    defer {
+        std.heap.page_allocator.free(data);
+        screenshot_data = null;
+    }
+
+    // Encode and write to disk
+    try image.writeImageToFile(
+        data,
+        screenshot_width,
+        screenshot_height,
+        screenshot_bytes_per_row,
+        output_path,
+        format,
+    );
 }
