@@ -5,8 +5,11 @@ Screen and system audio capture from the command line, using native OS APIs. No 
 ```bash
 spectacle record --output demo.mp4              # record screen + audio
 spectacle record --app "Chrome" --output t.mp4  # capture a specific app
+spectacle record --mic --output narrated.mp4      # include microphone
 spectacle record --no-audio --output silent.mp4  # video only
 spectacle record --no-cursor --output clean.mp4  # hide cursor
+spectacle screenshot --output shot.png            # take a screenshot
+spectacle screenshot --app "Chrome" --output p.png # capture a specific app
 spectacle audio --output meeting.wav             # audio only
 spectacle audio --app "Spotify" --output music.wav
 spectacle list displays                          # list capture targets
@@ -32,7 +35,7 @@ zig build -Doptimize=ReleaseFast
 
 | Flag | Description |
 |------|-------------|
-| `--output FILE` | Output file path (.mp4 or .mov for video, .wav for audio) |
+| `--output FILE` | Output file path (.mp4/.mov for video, .wav for audio, .png/.jpg for screenshots) |
 | `--window NAME` | Capture a specific window by title |
 | `--pid PID` | Capture a specific window by process ID |
 | `--app NAME` | Capture a specific app by name |
@@ -40,6 +43,7 @@ zig build -Doptimize=ReleaseFast
 | `--region X,Y,W,H` | Capture a screen region |
 | `--no-audio` | Video only, suppress audio capture |
 | `--no-cursor` | Hide the cursor in the recording |
+| `--mic` | Include microphone audio in the recording |
 | `--fps N` | Frame rate (default: 30) |
 | `--scale F` | Resolution scale factor (default: 1.0) |
 | `--sample-rate N` | Audio sample rate in Hz (default: 48000) |
